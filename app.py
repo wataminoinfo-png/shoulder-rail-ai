@@ -13,16 +13,20 @@ logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
-# 環境変数
+# 環境変数から設定を取得
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
-GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+# ここで複数の可能性（GOOGLE_API_KEY または API_KEY）をチェックするように強化
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY') or os.getenv('API_KEY')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-# Gemini APIの初期化
-genai.configure(api_key=GOOGLE_API_KEY)
+# Gemini APIの初期化（キーが空でないかチェック）
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY.strip()) # 前後の空白を削除
+else:
+    logger.error("GOOGLE_API_KEY is not set in environment variables!")
 
 def extract_text_from_pdf(pdf_path):
     text = ""
@@ -44,17 +48,17 @@ def get_knowledge_base():
     if not os.path.exists(knowledge_dir):
         return "知識ベースフォルダが見つかりません。"
     
-    files = os.listdir(knowledge_dir)
-    for filename in files:
-        file_path = os.path.join(knowledge_dir, filename)
-        if filename.lower().endswith('.txt'):
-            try:
+    try:
+        files = os.listdir(knowledge_dir)
+        for filename in files:
+            file_path = os.path.join(knowledge_dir, filename)
+            if filename.lower().endswith('.txt'):
                 with open(file_path, 'r', encoding='utf-8') as f:
                     knowledge_text += f"\n--- Source: {filename} ---\n{f.read()}\n"
-            except Exception as e:
-                logger.error(f"Error reading {filename}: {e}")
-        elif filename.lower().endswith('.pdf'):
-            knowledge_text += f"\n--- Source: {filename} ---\n{extract_text_from_pdf(file_path)}\n"
+            elif filename.lower().endswith('.pdf'):
+                knowledge_text += f"\n--- Source: {filename} ---\n{extract_text_from_pdf(file_path)}\n"
+    except Exception as e:
+        logger.error(f"Error accessing knowledge dir: {e}")
             
     return knowledge_text[:30000] if knowledge_text else "知識ベースに有効なデータがありません。"
 
@@ -72,25 +76,28 @@ def callback():
 def handle_message(event):
     user_message = event.message.text
     
+    if not GOOGLE_API_KEY:
+        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="エラー: APIキーが設定されていません。Renderの設定を確認してください。"))
+        return
+
     try:
         knowledge = get_knowledge_base()
         
-        # システムプロンプト
+        # システムプロンプト（より簡潔に）
         prompt = (
-            "あなたは肩関節や理学療法に精通した専門家です。"
-            "以下の【知識ベース】の内容を最優先で参照して回答してください。"
-            f"【知識ベース】\n{knowledge}\n\n"
+            "あなたは肩関節や理学療法の専門家です。提供された【知識ベース】を最優先で参照して回答してください。"
+            f"\n\n【知識ベース】\n{knowledge}\n\n"
             f"ユーザーの質問: {user_message}"
         )
         
-        # モデルの生成（最新の指定方法）
+        # モデルの生成
         model = genai.GenerativeModel('gemini-1.5-flash')
         response = model.generate_content(prompt)
         reply_text = response.text
         
     except Exception as e:
-        logger.error(f"Error: {e}")
-        reply_text = f"申し訳ありません。エラーが発生しました。\n内容: {str(e)[:100]}"
+        logger.error(f"Gemini Error: {e}")
+        reply_text = f"申し訳ありません。AIの呼び出しでエラーが発生しました。\n内容: {str(e)[:100]}"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
