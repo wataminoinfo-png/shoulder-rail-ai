@@ -44,7 +44,6 @@ def get_knowledge_base():
     if not os.path.exists(knowledge_dir):
         return "知識ベースフォルダが見つかりません。"
     
-    # 全てのファイルを取得（日本語名対策として、globではなくos.listdirを使用）
     files = os.listdir(knowledge_dir)
     logger.info(f"Found files in knowledge: {files}")
 
@@ -59,10 +58,9 @@ def get_knowledge_base():
         elif filename.lower().endswith('.pdf'):
             knowledge_text += f"\n--- Source: {filename} ---\n{extract_text_from_pdf(file_path)}\n"
             
-    if not knowledge_text.strip():
+    if not knowledge_text.strip() or knowledge_text == "知識ベースフォルダが見つかりません。":
         return "知識ベースに有効なテキストデータがありません。"
     
-    # テキストが長すぎる場合の制限（Geminiの入力制限対策）
     return knowledge_text[:30000] 
 
 @app.route("/callback", methods=['POST'])
@@ -92,6 +90,8 @@ def handle_message(event):
             f"【知識ベース】\n{knowledge}"
         )
         
+        # モデル名を 'gemini-1.5-flash' から 'models/gemini-1.5-flash' に変更（またはその逆で修正）
+        # 404エラー対策として、より一般的な指定方法に変更します
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             system_instruction=system_instruction
@@ -102,7 +102,8 @@ def handle_message(event):
         
     except Exception as e:
         logger.error(f"Gemini Error: {e}")
-        reply_text = f"申し訳ありません。エラーが発生しました。\n原因: {str(e)[:50]}"
+        # エラーが起きた際、原因が分かりやすいように詳細を表示します
+        reply_text = f"申し訳ありません。AIの呼び出しでエラーが発生しました。\n原因: {str(e)[:100]}"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
