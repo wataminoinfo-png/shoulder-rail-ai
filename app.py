@@ -1,61 +1,23 @@
 import os
-import logging
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
-from PyPDF2 import PdfReader
-
-# ログ設定
-logging.basicConfig(level=logging.INFO)
-logger = logging.getLogger(__name__)
 
 app = Flask(__name__)
 
 # 環境変数
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
-raw_api_key = os.getenv('GOOGLE_API_KEY')
-GOOGLE_API_KEY = raw_api_key.strip() if raw_api_key else None
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
 
-def extract_text_from_pdf(pdf_path):
-    text = ""
-    try:
-        reader = PdfReader(pdf_path)
-        for i, page in enumerate(reader.pages):
-            page_text = page.extract_text()
-            if page_text:
-                text += f"[Page {i+1}]\n{page_text}\n"
-    except Exception as e:
-        logger.error(f"Error reading PDF {pdf_path}: {e}")
-        return ""
-    return text
-
-def get_knowledge_base():
-    knowledge_text = ""
-    # knowledgeフォルダ内と、リポジトリ直下の両方のPDFを探すように強化
-    search_dirs = ['knowledge', '.']
-    
-    for directory in search_dirs:
-        if not os.path.exists(directory):
-            continue
-        try:
-            files = os.listdir(directory)
-            for filename in files:
-                file_path = os.path.join(directory, filename)
-                if filename.lower().endswith('.txt'):
-                    with open(file_path, 'r', encoding='utf-8') as f:
-                        knowledge_text += f"\n--- Source: {filename} ---\n{f.read()}\n"
-                elif filename.lower().endswith('.pdf'):
-                    knowledge_text += f"\n--- Source: {filename} ---\n{extract_text_from_pdf(file_path)}\n"
-        except Exception as e:
-            logger.error(f"Error accessing {directory}: {e}")
-            
-    return knowledge_text[:30000]
+# Geminiの初期化
+if GOOGLE_API_KEY:
+    genai.configure(api_key=GOOGLE_API_KEY.strip())
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -70,29 +32,21 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
-    if not GOOGLE_API_KEY:
-        line_bot_api.reply_message(event.reply_token, TextSendMessage(text="エラー: GOOGLE_API_KEYが設定されていません。"))
-        return
-
+    
     try:
-        genai.configure(api_key=GOOGLE_API_KEY)
-        knowledge = get_knowledge_base()
-        
-        prompt = (
-            "あなたは肩関節や理学療法の専門家です。提供された【知識ベース】を最優先で参照して回答してください。"
-            f"\n\n【知識ベース】\n{knowledge}\n\n"
-            f"ユーザーの質問: {user_message}"
-        )
-        
+        # Gemini 1.5 Flashを使用して回答を生成
         model = genai.GenerativeModel('gemini-1.5-flash')
-        response = model.generate_content(prompt)
+        response = model.generate_content(
+            f"あなたは肩関節の専門家として、丁寧かつ簡潔に答えてください。\n質問: {user_message}"
+        )
         reply_text = response.text
-        
     except Exception as e:
-        logger.error(f"Gemini Error: {e}")
-        reply_text = f"AI呼び出しエラーが発生しました。\n詳細: {str(e)[:150]}"
+        reply_text = "申し訳ありません。現在システムを調整中です。"
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
