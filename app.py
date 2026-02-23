@@ -1,6 +1,7 @@
 import os
 import sys
 import glob
+import logging
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
@@ -8,9 +9,13 @@ from linebot.models import MessageEvent, TextMessage, TextSendMessage
 import google.generativeai as genai
 from PyPDF2 import PdfReader
 
+# ログ設定
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
 app = Flask(__name__)
 
-# 環境変数から設定を取得
+# 環境変数
 LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
 LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
 GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
@@ -20,45 +25,45 @@ handler = WebhookHandler(LINE_CHANNEL_SECRET)
 genai.configure(api_key=GOOGLE_API_KEY)
 
 def extract_text_from_pdf(pdf_path):
-    """PDFファイルからテキストを抽出する"""
     text = ""
     try:
         reader = PdfReader(pdf_path)
-        for page in reader.pages:
+        for i, page in enumerate(reader.pages):
             page_text = page.extract_text()
             if page_text:
-                text += page_text + "\n"
+                text += f"[Page {i+1}]\n{page_text}\n"
     except Exception as e:
-        print(f"Error reading PDF {pdf_path}: {e}")
+        logger.error(f"Error reading PDF {pdf_path}: {e}")
+        return f"(Error reading file: {os.path.basename(pdf_path)})"
     return text
 
 def get_knowledge_base():
-    """knowledgeフォルダ内の全テキストとPDFの内容を結合して取得する"""
     knowledge_text = ""
     knowledge_dir = 'knowledge'
     
     if not os.path.exists(knowledge_dir):
-        return "現在、知識ベースに登録されている資料はありません。"
+        return "知識ベースフォルダが見つかりません。"
     
-    # テキストファイルの読み込み
-    for txt_file in glob.glob(os.path.join(knowledge_dir, "*.txt")):
-        try:
-            with open(txt_file, 'r', encoding='utf-8') as f:
-                knowledge_text += f"\n--- Source: {os.path.basename(txt_file)} ---\n"
-                knowledge_text += f.read() + "\n"
-        except Exception as e:
-            print(f"Error reading txt {txt_file}: {e}")
+    # 全てのファイルを取得（日本語名対策として、globではなくos.listdirを使用）
+    files = os.listdir(knowledge_dir)
+    logger.info(f"Found files in knowledge: {files}")
+
+    for filename in files:
+        file_path = os.path.join(knowledge_dir, filename)
+        if filename.lower().endswith('.txt'):
+            try:
+                with open(file_path, 'r', encoding='utf-8') as f:
+                    knowledge_text += f"\n--- Source: {filename} ---\n{f.read()}\n"
+            except Exception as e:
+                logger.error(f"Error reading {filename}: {e}")
+        elif filename.lower().endswith('.pdf'):
+            knowledge_text += f"\n--- Source: {filename} ---\n{extract_text_from_pdf(file_path)}\n"
             
-    # PDFファイルの読み込み
-    for pdf_file in glob.glob(os.path.join(knowledge_dir, "*.pdf")):
-        knowledge_text += f"\n--- Source: {os.path.basename(pdf_file)} ---\n"
-        knowledge_text += extract_text_from_pdf(pdf_file) + "\n"
-        
-    # 知識ベースが空の場合のフォールバック
     if not knowledge_text.strip():
-        return "知識ベースに有効なテキストデータが見つかりませんでした。"
-        
-    return knowledge_text
+        return "知識ベースに有効なテキストデータがありません。"
+    
+    # テキストが長すぎる場合の制限（Geminiの入力制限対策）
+    return knowledge_text[:30000] 
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -73,22 +78,20 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
+    logger.info(f"Received message: {user_message}")
     
     try:
-        # 知識ベースの読み込み
         knowledge = get_knowledge_base()
         
-        # システムプロンプトの構築
         system_instruction = (
             "あなたは肩関節や理学療法、医学的知識に精通した専門的なアシスタントです。"
             "以下の提供された【知識ベース】を最優先で参照して回答してください。"
             "知識ベースにない内容については、一般的な医学的根拠に基づいて回答しつつ、"
             "「提供された資料には直接的な記載がありませんが、一般的な知見としては〜」と補足してください。"
-            "回答はLINEで読みやすいよう、適宜改行を入れ、丁寧かつ簡潔（最大500文字程度）にまとめてください。\n\n"
+            "回答はLINEで読みやすいよう、適宜改行を入れ、丁寧かつ簡潔にまとめてください。\n\n"
             f"【知識ベース】\n{knowledge}"
         )
         
-        # Gemini 1.5 Flashを使用して回答を生成
         model = genai.GenerativeModel(
             model_name="gemini-1.5-flash",
             system_instruction=system_instruction
@@ -98,13 +101,10 @@ def handle_message(event):
         reply_text = response.text
         
     except Exception as e:
-        print(f"Error during Gemini generation: {e}")
-        reply_text = f"申し訳ありません。回答の生成中にエラーが発生しました。\nエラー内容: {str(e)[:100]}"
+        logger.error(f"Gemini Error: {e}")
+        reply_text = f"申し訳ありません。エラーが発生しました。\n原因: {str(e)[:50]}"
 
-    line_bot_api.reply_message(
-        event.reply_token,
-        TextSendMessage(text=reply_text)
-    )
+    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
 if __name__ == "__main__":
     port = int(os.environ.get("PORT", 5000))
