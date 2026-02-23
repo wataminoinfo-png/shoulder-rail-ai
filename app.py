@@ -1,6 +1,4 @@
 import os
-import sys
-import glob
 import logging
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
@@ -22,6 +20,8 @@ GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
 
 line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
 handler = WebhookHandler(LINE_CHANNEL_SECRET)
+
+# Gemini APIの初期化
 genai.configure(api_key=GOOGLE_API_KEY)
 
 def extract_text_from_pdf(pdf_path):
@@ -34,7 +34,7 @@ def extract_text_from_pdf(pdf_path):
                 text += f"[Page {i+1}]\n{page_text}\n"
     except Exception as e:
         logger.error(f"Error reading PDF {pdf_path}: {e}")
-        return f"(Error reading file: {os.path.basename(pdf_path)})"
+        return ""
     return text
 
 def get_knowledge_base():
@@ -45,8 +45,6 @@ def get_knowledge_base():
         return "知識ベースフォルダが見つかりません。"
     
     files = os.listdir(knowledge_dir)
-    logger.info(f"Found files in knowledge: {files}")
-
     for filename in files:
         file_path = os.path.join(knowledge_dir, filename)
         if filename.lower().endswith('.txt'):
@@ -58,10 +56,7 @@ def get_knowledge_base():
         elif filename.lower().endswith('.pdf'):
             knowledge_text += f"\n--- Source: {filename} ---\n{extract_text_from_pdf(file_path)}\n"
             
-    if not knowledge_text.strip() or knowledge_text == "知識ベースフォルダが見つかりません。":
-        return "知識ベースに有効なテキストデータがありません。"
-    
-    return knowledge_text[:30000] 
+    return knowledge_text[:30000] if knowledge_text else "知識ベースに有効なデータがありません。"
 
 @app.route("/callback", methods=['POST'])
 def callback():
@@ -76,34 +71,26 @@ def callback():
 @handler.add(MessageEvent, message=TextMessage)
 def handle_message(event):
     user_message = event.message.text
-    logger.info(f"Received message: {user_message}")
     
     try:
         knowledge = get_knowledge_base()
         
-        system_instruction = (
-            "あなたは肩関節や理学療法、医学的知識に精通した専門的なアシスタントです。"
-            "以下の提供された【知識ベース】を最優先で参照して回答してください。"
-            "知識ベースにない内容については、一般的な医学的根拠に基づいて回答しつつ、"
-            "「提供された資料には直接的な記載がありませんが、一般的な知見としては〜」と補足してください。"
-            "回答はLINEで読みやすいよう、適宜改行を入れ、丁寧かつ簡潔にまとめてください。\n\n"
-            f"【知識ベース】\n{knowledge}"
+        # システムプロンプト
+        prompt = (
+            "あなたは肩関節や理学療法に精通した専門家です。"
+            "以下の【知識ベース】の内容を最優先で参照して回答してください。"
+            f"【知識ベース】\n{knowledge}\n\n"
+            f"ユーザーの質問: {user_message}"
         )
         
-        # モデル名を 'gemini-1.5-flash' から 'models/gemini-1.5-flash' に変更（またはその逆で修正）
-        # 404エラー対策として、より一般的な指定方法に変更します
-        model = genai.GenerativeModel(
-            model_name="gemini-1.5-flash",
-            system_instruction=system_instruction
-        )
-        
-        response = model.generate_content(user_message)
+        # モデルの生成（最新の指定方法）
+        model = genai.GenerativeModel('gemini-1.5-flash')
+        response = model.generate_content(prompt)
         reply_text = response.text
         
     except Exception as e:
-        logger.error(f"Gemini Error: {e}")
-        # エラーが起きた際、原因が分かりやすいように詳細を表示します
-        reply_text = f"申し訳ありません。AIの呼び出しでエラーが発生しました。\n原因: {str(e)[:100]}"
+        logger.error(f"Error: {e}")
+        reply_text = f"申し訳ありません。エラーが発生しました。\n内容: {str(e)[:100]}"
 
     line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
 
