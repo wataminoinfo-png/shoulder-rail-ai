@@ -1,19 +1,68 @@
-port os
+import os
 import sys
+import glob
 from flask import Flask, request, abort
 from linebot import LineBotApi, WebhookHandler
 from linebot.exceptions import InvalidSignatureError
 from linebot.models import MessageEvent, TextMessage, TextSendMessage
+import google.generativeai as genai
+from PyPDF2 import PdfReader
 
 app = Flask(__name__)
 
-# 環境変数からLINEの鍵を取得（Renderで設定します）
-line_bot_api = LineBotApi(os.getenv('LINE_CHANNEL_ACCESS_TOKEN'))
-handler = WebhookHandler(os.getenv('LINE_CHANNEL_SECRET'))
+# 環境変数から設定を取得
+LINE_CHANNEL_ACCESS_TOKEN = os.getenv('LINE_CHANNEL_ACCESS_TOKEN')
+LINE_CHANNEL_SECRET = os.getenv('LINE_CHANNEL_SECRET')
+GOOGLE_API_KEY = os.getenv('GOOGLE_API_KEY')
+
+line_bot_api = LineBotApi(LINE_CHANNEL_ACCESS_TOKEN)
+handler = WebhookHandler(LINE_CHANNEL_SECRET)
+genai.configure(api_key=GOOGLE_API_KEY)
+
+def extract_text_from_pdf(pdf_path):
+    """PDFファイルからテキストを抽出する"""
+    text = ""
+    try:
+        reader = PdfReader(pdf_path)
+        for page in reader.pages:
+            page_text = page.extract_text()
+            if page_text:
+                text += page_text + "\n"
+    except Exception as e:
+        print(f"Error reading PDF {pdf_path}: {e}")
+    return text
+
+def get_knowledge_base():
+    """knowledgeフォルダ内の全テキストとPDFの内容を結合して取得する"""
+    knowledge_text = ""
+    knowledge_dir = 'knowledge'
+    
+    if not os.path.exists(knowledge_dir):
+        return "現在、知識ベースに登録されている資料はありません。"
+    
+    # テキストファイルの読み込み
+    for txt_file in glob.glob(os.path.join(knowledge_dir, "*.txt")):
+        try:
+            with open(txt_file, 'r', encoding='utf-8') as f:
+                knowledge_text += f"\n--- Source: {os.path.basename(txt_file)} ---\n"
+                knowledge_text += f.read() + "\n"
+        except Exception as e:
+            print(f"Error reading txt {txt_file}: {e}")
+            
+    # PDFファイルの読み込み
+    for pdf_file in glob.glob(os.path.join(knowledge_dir, "*.pdf")):
+        knowledge_text += f"\n--- Source: {os.path.basename(pdf_file)} ---\n"
+        knowledge_text += extract_text_from_pdf(pdf_file) + "\n"
+        
+    # 知識ベースが空の場合のフォールバック
+    if not knowledge_text.strip():
+        return "知識ベースに有効なテキストデータが見つかりませんでした。"
+        
+    return knowledge_text
 
 @app.route("/callback", methods=['POST'])
 def callback():
-    signature = request.headers['X-Line-Signature']
+    signature = request.headers.get('X-Line-Signature')
     body = request.get_data(as_text=True)
     try:
         handler.handle(body, signature)
@@ -25,36 +74,38 @@ def callback():
 def handle_message(event):
     user_message = event.message.text
     
-    # 2025年最新エビデンス（ナラティブレビュー）に基づく簡易診断ロジック
-    # ユーザーのキーワードから「病期（フェーズ）」を推定
-    if "夜間痛" in user_message or "激痛" in user_message:
-        reply_text = (
-            "【AI診断：炎症期（フェーズ1）の可能性】\n\n"
-            "2025年の最新レビューに基づくと、現在は組織の炎症が強い時期です。\n"
-            "無理なストレッチは逆効果になるリスクがあります。\n\n"
-            "戦略的アドバイス：\n"
-            "・まずは「安静」と「痛みの管理」を優先してください。\n"
-            "・夜間のポジショニング（クッション活用）が有効です。\n\n"
-            "詳細な回復レールを確認したい方は、個別相談をご活用ください。"
+    try:
+        # 知識ベースの読み込み
+        knowledge = get_knowledge_base()
+        
+        # システムプロンプトの構築
+        system_instruction = (
+            "あなたは肩関節や理学療法、医学的知識に精通した専門的なアシスタントです。"
+            "以下の提供された【知識ベース】を最優先で参照して回答してください。"
+            "知識ベースにない内容については、一般的な医学的根拠に基づいて回答しつつ、"
+            "「提供された資料には直接的な記載がありませんが、一般的な知見としては〜」と補足してください。"
+            "回答はLINEで読みやすいよう、適宜改行を入れ、丁寧かつ簡潔（最大500文字程度）にまとめてください。\n\n"
+            f"【知識ベース】\n{knowledge}"
         )
-    elif "固まった" in user_message or "上がらない" in user_message:
-        reply_text = (
-            "【AI診断：凍結期（フェーズ2）の可能性】\n\n"
-            "現在は炎症が落ち着き、組織の癒着（固まり）が主体の時期です。\n"
-            "Hand誌のデータでは、放置すると4年後も40%に症状が残るリスクがあります。\n\n"
-            "戦略的アドバイス：\n"
-            "・痛みのない範囲での「愛護的な可動域訓練」を開始する時期です。\n"
-            "・無理に動かさず、正しい『回復レール』に乗ることが重要です。"
+        
+        # Gemini 1.5 Flashを使用して回答を生成
+        model = genai.GenerativeModel(
+            model_name="gemini-1.5-flash",
+            system_instruction=system_instruction
         )
-    else:
-        reply_text = (
-            "メッセージありがとうございます。\n\n"
-            "「夜間痛がある」「肩が上がらない」など、現在の状況を教えていただけますか？\n"
-            "2025年最新エビデンスに基づき、あなたの『肩の現在地』を診断します。"
-        )
+        
+        response = model.generate_content(user_message)
+        reply_text = response.text
+        
+    except Exception as e:
+        print(f"Error during Gemini generation: {e}")
+        reply_text = f"申し訳ありません。回答の生成中にエラーが発生しました。\nエラー内容: {str(e)[:100]}"
 
-    line_bot_api.reply_message(event.reply_token, TextSendMessage(text=reply_text))
+    line_bot_api.reply_message(
+        event.reply_token,
+        TextSendMessage(text=reply_text)
+    )
 
 if __name__ == "__main__":
-    port = int(os.getenv("PORT", 5000))
+    port = int(os.environ.get("PORT", 5000))
     app.run(host="0.0.0.0", port=port)
